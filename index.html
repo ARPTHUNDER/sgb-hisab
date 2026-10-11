@@ -62,6 +62,8 @@ const Core = (() => {
     locations: [{id: "main", name: "Main Storage"}],
     vendorPayments: [], transfers: [],
     items: [],
+    customers: [],
+    vendors: [],
     bills: [],
     purchases: [],
     cash: [],
@@ -92,6 +94,22 @@ const Core = (() => {
     for (const k of ["payments", "adjustments", "estimates", "audit"])
       if (!Array.isArray(d[k])) throw Error("बैकअप सूची गलत: " + k);
     d.meta = d.meta || {};
+    // Keep reusable name directories in localStorage; older backups build them from history.
+    d.customers = Array.isArray(d.customers) ? d.customers.filter(x => typeof x === "string") : [];
+    d.vendors = Array.isArray(d.vendors) ? d.vendors.filter(x => typeof x === "string") : [];
+    // Derive these from the full history on every load/backup restore, without rewriting entries.
+    const addDirectoryName = (list, value) => {
+      const name = String(value || "").trim();
+      if (name && !list.some(x => x.toLocaleLowerCase() === name.toLocaleLowerCase())) list.push(name);
+    };
+    for (const b of (d.bills || [])) if (b.customer !== "Cash Customer") addDirectoryName(d.customers, b.customer);
+    for (const x of (d.payments || [])) addDirectoryName(d.customers, x.customer);
+    for (const x of (d.purchases || [])) addDirectoryName(d.vendors, x.supplier);
+    for (const x of (d.vendorPayments || [])) addDirectoryName(d.vendors, x.supplier);
+    d.customers = d.customers.filter(x => typeof x === "string" && x.trim()).map(x => x.trim());
+    d.vendors = d.vendors.filter(x => typeof x === "string" && x.trim()).map(x => x.trim());
+    d.customers = [...new Map(d.customers.map(x => [x.toLocaleLowerCase(), x])).values()];
+    d.vendors = [...new Map(d.vendors.map(x => [x.toLocaleLowerCase(), x])).values()];
     for (const k of [
       "items",
       "bills",
@@ -385,12 +403,17 @@ const Core = (() => {
     }
     return Object.values(vendors).map(v=>({...v,billed:round(v.billed),paid:round(v.paid),balance:round(v.billed-v.paid)}));
   }
+  function rememberName(list, value) {
+    const name = String(value || "").trim();
+    if (name && !list.some(x => x.toLocaleLowerCase() === name.toLocaleLowerCase())) list.push(name);
+  }
   function saveVendorPayment(db,v,id) {
     const d=clone(db); upgrade(d); const old=d.vendorPayments.find(p=>p.id===id);
     if(!v.supplier?.trim()) throw Error('सप्लायर का नाम भरें।');
     if(!['Cash','UPI','Bank'].includes(v.mode)) throw Error('भुगतान तरीका चुनें।');
     const p={...v,id:old?.id||uid(),supplier:v.supplier.trim(),date:date(v.date),amount:num(v.amount,'भुगतान',.01)};
     if(old) d.vendorPayments[d.vendorPayments.indexOf(old)]=p; else d.vendorPayments.push(p);
+    rememberName(d.vendors, p.supplier);
     return {db:d,record:p};
   }
   function transfer(db,v) {
@@ -435,6 +458,7 @@ const Core = (() => {
       d.bills.push(b);
       d.settings.nextNo++;
     }
+    if (b.customer !== "Cash Customer") rememberName(d.customers, b.customer);
     return { db: d, record: b };
   }
   function deleteBill(db, id) {
@@ -486,6 +510,7 @@ const Core = (() => {
     i.cost = rate;
     if (old) d.purchases[d.purchases.indexOf(old)] = p;
     else d.purchases.push(p);
+    rememberName(d.vendors, p.supplier);
     return { db: d, record: p };
   }
   function deletePurchase(db, id) {
@@ -1456,7 +1481,7 @@ function stockCount(id) {
 function purchaseModal(id) {
   const p = db.purchases.find(p => p.id === id), item=db.items.find(i=>i.id===p?.itemId);
   openModal(p ? L("खरीद बदलें","Edit purchase") : L("खरीद जोड़ें","Add purchase"),
-    `<div class="grid">${field("pDate",L("तारीख","Date"),p?.date||today(),"date","required")}${field("pSupplier",L("सप्लायर","Supplier"),p?.supplier||"")}
+    `<div class="grid">${field("pDate",L("तारीख","Date"),p?.date||today(),"date","required")}${field("pSupplier",L("सप्लायर","Supplier"),p?.supplier||"","text",'list="vendorNames" autocomplete="off"')}<datalist id="vendorNames">${db.vendors.map(n=>`<option value="${esc(n)}"></option>`).join("")}</datalist>
     <div class="wide">${field("pItem",L("माल का नाम - चुनें या नया लिखें","Item name - choose or type a new name"),item?.name||p?.name||"","text",'required list="purchaseItems" maxlength="160" autocomplete="off"')}<datalist id="purchaseItems">${db.items.map(i=>`<option value="${esc(i.name)}"></option>`).join('')}</datalist><p class="note" id="pItemHint"></p></div>
     ${field("pQty",L("मात्रा","Quantity"),p?.qty??1,"number",'min=".001" step=".001" required')}${field("pRate",L("खरीद रेट ₹","Purchase rate ₹"),p?.rate??0,"number",'min="0" step=".01" required')}
     ${field("pUnit",L("इकाई (नए माल के लिए)","Unit (for new items)"),item?.unit||"kg","text",'required maxlength="20"')}${field("pGst",L("GST % (नए माल के लिए)","GST % (for new items)"),item?.gst??0,"number",'min="0" max="100" step=".01"')}${field("pHsn",L("HSN (यदि हो)","HSN (if available)"),item?.hsn||"")}${paymentSelect("pMode",p?.mode||"Cash",true)}${locationSelect("pLocation",p?.locationId)}</div>
@@ -1490,7 +1515,7 @@ function billModal(id) {
     : [];
   openModal(
     b ? L("बिक्री बिल बदलें","Edit sales invoice") : L("नया बिक्री बिल","New sales invoice"),
-    `<div class="grid">${field("bDate", L("तारीख","Date"), b?.date || today(), "date", "required")}${field("bNo", L("बिल नंबर","Invoice number"), b?.billNo || "", "text", L("placeholder=\"अपने आप SGB नंबर\"","placeholder=\"Automatically SGB Number\""))}${field("bCustomer", L("ग्राहक का नाम","Customer name"), b?.customer || "")}${paymentSelect("bMode", b?.mode || "Cash", true)}${field("bGstin", L("ग्राहक GSTIN (यदि हो)","Customer GSTIN (if available)"), b?.custGstin || "", "text", 'maxlength="15"')}${select(
+    `<div class="grid">${field("bDate", L("तारीख","Date"), b?.date || today(), "date", "required")}${field("bNo", L("बिल नंबर","Invoice number"), b?.billNo || "", "text", L("placeholder=\"अपने आप SGB नंबर\"","placeholder=\"Automatically SGB Number\""))}${field("bCustomer", L("ग्राहक का नाम","Customer name"), b?.customer || "", "text", 'list="customerNames" autocomplete="off"')}<datalist id="customerNames">${db.customers.map(n=>`<option value="${esc(n)}"></option>`).join("")}</datalist>${paymentSelect("bMode", b?.mode || "Cash", true)}${field("bGstin", L("ग्राहक GSTIN (यदि हो)","Customer GSTIN (if available)"), b?.custGstin || "", "text", 'maxlength="15"')}${select(
       "bState",
       L("ग्राहक का राज्य","Customer state"),
       [
@@ -1686,13 +1711,7 @@ function paymentModal(customer = "", id) {
   const p = db.payments.find((p) => p.id === id);
   openModal(
     p ? L("प्राप्ति बदलें","Edit receipt") : L("उधार का भुगतान मिला","Customer payment received"),
-    `<div class="grid">${field("lCustomer", L("ग्राहक","Customer"), p?.customer || customer, "text", 'required list="customerNames"')}<datalist id="customerNames">${Core.ledger(
-      db,
-    )
-      .map((c) => `<option value="${esc(c.customer)}">`)
-      .join(
-        "",
-      )}</datalist>${field("lDate", L("तारीख","Date"), p?.date || today(), "date", "required")}${field("lAmount", L("प्राप्त रकम ₹","Amount received ₹"), p?.amount || "", "number", 'min=".01" step=".01" required')}${paymentSelect("lMode", p?.mode || "Cash")}<div class="wide">${field("lNote", L("विवरण / reference","Details / reference"), p?.note || "")}</div></div>`,
+    `<div class="grid">${field("lCustomer", L("ग्राहक","Customer"), p?.customer || customer, "text", 'required list="customerNames"')}<datalist id="customerNames">${db.customers.map(n => `<option value="${esc(n)}"></option>`).join("")}</datalist>${field("lDate", L("तारीख","Date"), p?.date || today(), "date", "required")}${field("lAmount", L("प्राप्त रकम ₹","Amount received ₹"), p?.amount || "", "number", 'min=".01" step=".01" required')}${paymentSelect("lMode", p?.mode || "Cash")}<div class="wide">${field("lNote", L("विवरण / reference","Details / reference"), p?.note || "")}</div></div>`,
     () => {
       const customer = $("lCustomer").value.trim();
       if (!customer) throw Error(L("ग्राहक का नाम भरें।","Enter the customer name."));
@@ -1707,6 +1726,7 @@ function paymentModal(customer = "", id) {
         };
       if (p) n.payments[n.payments.findIndex((x) => x.id === id)] = v;
       else n.payments.push(v);
+      if (!n.customers.some(x => x.toLocaleLowerCase() === customer.toLocaleLowerCase())) n.customers.push(customer);
       commit(n, L("उधार प्राप्ति: ","Customer payment: ") + customer);
       afterSave(L("भुगतान सेव हुआ।","Payment saved."));
     },
@@ -2100,6 +2120,10 @@ function estimateCsv(id) {
   download(
     "SGB-AUTO-ESTIMATE-" + e.start + ".csv",
     csvText([
+      ["Report", "30-day estimate"],
+      ["Period", e.start + " to " + e.end],
+      ["Total estimated", e.total],
+      ["AUTO-ESTIMATE · NOT A TAX INVOICE"],
       ["Label", "Date", "Item", "Qty", "Unit", "Rate", "Amount", "Daily Total"],
       ...e.vouchers.flatMap((v) => [
         ...v.lines.map((l) => [
@@ -2337,7 +2361,7 @@ function transferModal() {
 }
 function vendorPaymentModal(supplier='',id) {
   const p=db.vendorPayments.find(p=>p.id===id);
-  openModal(p?L("सप्लायर भुगतान बदलें","Edit supplier payment"):L("सप्लायर को भुगतान","Pay supplier"),`<div class="grid">${field('vSupplier',L("सप्लायर","Supplier"),p?.supplier||supplier,'text','required list="vendorNames"')}<datalist id="vendorNames">${Core.vendorLedger(db).map(v=>`<option value="${esc(v.supplier)}">`).join('')}</datalist>${field('vDate',L("तारीख","Date"),p?.date||today(),'date','required')}${field('vAmount',L("भुगतान रकम ₹","Amount paid ₹"),p?.amount||'','number','required min=".01" step=".01"')}${paymentSelect('vMode',p?.mode||'Cash')}<div class="wide">${field('vNote',L("विवरण / reference","Details / reference"),p?.note||'')}${L("</div></div><p class=\"note\">बची रकम से ज्यादा भुगतान सप्लायर को एडवांस दिखेगा। कैश में इसे फिर न भरें।</p>","</div></div><p class=\"note\">Any overpayment appears as a supplier advance. Do not enter it again in the cashbook.</p>")}`,()=>{
+  openModal(p?L("सप्लायर भुगतान बदलें","Edit supplier payment"):L("सप्लायर को भुगतान","Pay supplier"),`<div class="grid">${field('vSupplier',L("सप्लायर","Supplier"),p?.supplier||supplier,'text','required list="vendorNames"')}<datalist id="vendorNames">${db.vendors.map(v=>`<option value="${esc(v)}"></option>`).join('')}</datalist>${field('vDate',L("तारीख","Date"),p?.date||today(),'date','required')}${field('vAmount',L("भुगतान रकम ₹","Amount paid ₹"),p?.amount||'','number','required min=".01" step=".01"')}${paymentSelect('vMode',p?.mode||'Cash')}<div class="wide">${field('vNote',L("विवरण / reference","Details / reference"),p?.note||'')}${L("</div></div><p class=\"note\">बची रकम से ज्यादा भुगतान सप्लायर को एडवांस दिखेगा। कैश में इसे फिर न भरें।</p>","</div></div><p class=\"note\">Any overpayment appears as a supplier advance. Do not enter it again in the cashbook.</p>")}`,()=>{
     const r=Core.saveVendorPayment(db,{supplier:$('vSupplier').value,date:$('vDate').value,amount:$('vAmount').value,mode:$('vMode').value,note:$('vNote').value.trim()},id);
     commit(r.db,L("सप्लायर भुगतान","Supplier payment")); afterSave(L("सप्लायर भुगतान सेव हुआ।","Supplier payment saved."));
   });

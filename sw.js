@@ -1,4 +1,4 @@
-const CACHE="sgb-hisab-v5-2-1";
+const CACHE="sgb-hisab-v5-2-2";
 const APP="./";
 const SHELL=[APP,"./manifest.webmanifest","./icon-192.png","./icon-512.png","./icon-maskable-512.png"];
 self.addEventListener("install",event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL)).then(()=>self.skipWaiting())));
